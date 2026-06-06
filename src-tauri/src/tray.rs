@@ -19,6 +19,13 @@ const QUIT_ITEM_ID: &str = "quit";
 const ACCOUNTS_CHANGED_EVENT: &str = "accounts-changed";
 const SWITCH_ACCOUNT_BLOCKED_EVENT: &str = "switch-account-blocked";
 
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SwitchAccountBlockedPayload {
+    account_id: String,
+    error: String,
+}
+
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     let menu = build_menu(app, &load_accounts().unwrap_or_default())?;
     let icon = app
@@ -91,7 +98,13 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
                 refresh_menu(app);
                 if is_codex_running_switch_block(&error) {
                     show_main_window(app);
-                    let _ = app.emit(SWITCH_ACCOUNT_BLOCKED_EVENT, error);
+                    let _ = app.emit(
+                        SWITCH_ACCOUNT_BLOCKED_EVENT,
+                        SwitchAccountBlockedPayload {
+                            account_id: account_id.to_string(),
+                            error,
+                        },
+                    );
                 }
                 return;
             }

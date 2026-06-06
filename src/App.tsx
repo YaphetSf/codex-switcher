@@ -24,6 +24,10 @@ const DEFAULT_PRIMARY_WINDOW_MINUTES = 300;
 const LIMIT_FULL_THRESHOLD = 99.5;
 const SWITCH_ACCOUNT_BLOCKED_EVENT = "switch-account-blocked";
 type ThemeMode = "light" | "dark";
+interface SwitchAccountBlockedPayload {
+  accountId?: string;
+  error?: string;
+}
 type AutoWarmupLedger = Record<
   string,
   {
@@ -135,6 +139,7 @@ function App() {
   const [switchingId, setSwitchingId] = useState<string | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [processInfo, setProcessInfo] = useState<CodexProcessInfo | null>(null);
+  const [pendingTraySwitchAccountId, setPendingTraySwitchAccountId] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isOpeningCodex, setIsOpeningCodex] = useState(false);
   const [isExportingSlim, setIsExportingSlim] = useState(false);
@@ -474,20 +479,79 @@ function App() {
     void (async () => {
       if (!isTauriRuntime()) return;
       const { listen } = await import("@tauri-apps/api/event");
-      unlisten = await listen<string>(SWITCH_ACCOUNT_BLOCKED_EVENT, async (event) => {
-        const latestProcessInfo = await checkProcesses();
+      unlisten = await listen<SwitchAccountBlockedPayload>(
+        SWITCH_ACCOUNT_BLOCKED_EVENT,
+        async (event) => {
+          const latestProcessInfo = await checkProcesses();
+          const accountId = event.payload?.accountId;
 
-        if (latestProcessInfo && !latestProcessInfo.can_switch) {
-          setForceCloseConfirmOpen(true);
-          return;
+          if (accountId && latestProcessInfo && !latestProcessInfo.can_switch) {
+            setPendingTraySwitchAccountId(accountId);
+            setForceCloseConfirmOpen(true);
+            return;
+          }
+
+          if (accountId && latestProcessInfo?.can_switch) {
+            try {
+              setSwitchingId(accountId);
+              await switchAccount(accountId);
+              setPendingTraySwitchAccountId(null);
+              showWarmupToast("Switched account from tray.");
+            } catch (err) {
+              console.error("Failed to retry tray account switch:", err);
+              showWarmupToast(`Switch failed: ${formatWarmupError(err)}`, true);
+            } finally {
+              setSwitchingId(null);
+            }
+            return;
+          }
+
+          showWarmupToast(
+            event.payload?.error || "Account switch was blocked.",
+            true
+          );
         }
-
-        showWarmupToast(event.payload || "Account switch was blocked.", true);
-      });
+      );
     })();
 
     return () => unlisten?.();
-  }, [checkProcesses, setForceCloseConfirmOpen, showWarmupToast]);
+  }, [checkProcesses, formatWarmupError, setForceCloseConfirmOpen, showWarmupToast, switchAccount]);
+
+  const handleForceCloseConfirm = useCallback(async () => {
+    const accountId = pendingTraySwitchAccountId;
+    const latestProcessInfo = await forceCloseCodexProcesses();
+
+    if (!accountId) {
+      return;
+    }
+
+    if (!latestProcessInfo?.can_switch) {
+      setPendingTraySwitchAccountId(null);
+      return;
+    }
+
+    try {
+      setSwitchingId(accountId);
+      await switchAccount(accountId);
+      setPendingTraySwitchAccountId(null);
+      showWarmupToast("Switched account after force closing Codex.");
+    } catch (err) {
+      console.error("Failed to switch account after force close:", err);
+      setPendingTraySwitchAccountId(null);
+      showWarmupToast(
+        `Switch failed after force close: ${formatWarmupError(err)}`,
+        true
+      );
+    } finally {
+      setSwitchingId(null);
+    }
+  }, [
+    forceCloseCodexProcesses,
+    formatWarmupError,
+    pendingTraySwitchAccountId,
+    showWarmupToast,
+    switchAccount,
+  ]);
 
   const handleWarmupAccount = async (accountId: string, accountName: string) => {
     try {
@@ -799,6 +863,13 @@ function App() {
   const activeAccount = accounts.find((a) => a.is_active);
   const otherAccounts = accounts.filter((a) => !a.is_active);
   const hasRunningProcesses = processInfo && processInfo.count > 0;
+  const pendingTraySwitchAccount = useMemo(
+    () => accounts.find((account) => account.id === pendingTraySwitchAccountId),
+    [accounts, pendingTraySwitchAccountId]
+  );
+  const forceCloseConfirmLabel = pendingTraySwitchAccount
+    ? "Force close and switch account"
+    : "Force close running Codex processes";
 
   const sortedOtherAccounts = useMemo(() => {
     const getResetDeadline = (resetAt: number | null | undefined) =>
@@ -970,7 +1041,10 @@ function App() {
                       </span>
                       {hasRunningProcesses && (
                         <button
-                          onClick={() => setForceCloseConfirmOpen(true)}
+                          onClick={() => {
+                            setPendingTraySwitchAccountId(null);
+                            setForceCloseConfirmOpen(true);
+                          }}
                           disabled={isForceClosingCodex}
                           className="inline-flex items-center rounded-md border border-red-200 bg-red-50 px-2 py-0.5 text-xs font-medium text-red-700 transition-colors hover:bg-red-100 disabled:opacity-50 dark:border-red-800 dark:bg-red-900/20 dark:text-red-300 dark:hover:bg-red-900/30"
                           title="Force close running Codex processes"
@@ -1335,13 +1409,25 @@ function App() {
                 {(processInfo?.count ?? 0) === 1 ? "" : "es"} that currently
                 block account switching.
               </p>
+              {pendingTraySwitchAccount && (
+                <p className="text-sm text-gray-600 dark:text-gray-300">
+                  After closing Codex, Codex Switcher will switch to{" "}
+                  <span className="font-medium text-gray-900 dark:text-gray-100">
+                    {pendingTraySwitchAccount.name}
+                  </span>
+                  .
+                </p>
+              )}
               <p className="text-sm text-red-600 dark:text-red-300">
                 Unsaved Codex work may be lost.
               </p>
             </div>
             <div className="flex justify-end gap-3 p-5 border-t border-gray-100 dark:border-gray-800">
               <button
-                onClick={() => setForceCloseConfirmOpen(false)}
+                onClick={() => {
+                  setPendingTraySwitchAccountId(null);
+                  setForceCloseConfirmOpen(false);
+                }}
                 disabled={isForceClosingCodex}
                 className="px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 transition-colors disabled:opacity-50"
               >
@@ -1349,14 +1435,14 @@ function App() {
               </button>
               <button
                 onClick={() => {
-                  void forceCloseCodexProcesses();
+                  void handleForceCloseConfirm();
                 }}
                 disabled={isForceClosingCodex}
                 className="px-4 py-2.5 text-sm font-medium rounded-lg bg-red-600 hover:bg-red-700 text-white transition-colors disabled:opacity-50"
               >
                 {isForceClosingCodex
                   ? "Force closing..."
-                  : "Force close running Codex processes"}
+                  : forceCloseConfirmLabel}
               </button>
             </div>
           </div>

@@ -56,9 +56,12 @@ export function useForceCloseCodexProcesses({
           true
         );
       }
+
+      return latestProcessInfo;
     } catch (err) {
       console.error("Failed to force close Codex processes:", err);
       showToast(`Force close failed: ${formatError(err)}`, true);
+      return null;
     } finally {
       setConfirmOpen(false);
       setIsForceClosing(false);
