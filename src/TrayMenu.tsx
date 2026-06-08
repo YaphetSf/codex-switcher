@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import type { AccountInfo, UsageInfo } from "./types";
 import { invokeBackend, isTauriRuntime } from "./lib/platform";
+import {
+  applyTheme,
+  syncThemeFromStorage,
+  THEME_CHANGED_EVENT,
+  type ThemeMode,
+} from "./lib/theme";
 
 const TRAY_REFRESH_EVENT = "tray-refresh";
 const ACCOUNTS_CHANGED_EVENT = "accounts-changed";
@@ -149,16 +155,26 @@ function TrayMenu() {
     if (!isTauriRuntime()) return;
     let unlistenRefresh: (() => void) | undefined;
     let unlistenChanged: (() => void) | undefined;
+    let unlistenTheme: (() => void) | undefined;
 
     void (async () => {
       const { listen } = await import("@tauri-apps/api/event");
-      unlistenRefresh = await listen(TRAY_REFRESH_EVENT, () => void load());
+      unlistenRefresh = await listen(TRAY_REFRESH_EVENT, () => {
+        syncThemeFromStorage();
+        void load();
+      });
       unlistenChanged = await listen(ACCOUNTS_CHANGED_EVENT, () => void load());
+      unlistenTheme = await listen<ThemeMode>(THEME_CHANGED_EVENT, ({ payload }) => {
+        if (payload === "light" || payload === "dark") {
+          applyTheme(payload);
+        }
+      });
     })();
 
     return () => {
       unlistenRefresh?.();
       unlistenChanged?.();
+      unlistenTheme?.();
     };
   }, [load]);
 
