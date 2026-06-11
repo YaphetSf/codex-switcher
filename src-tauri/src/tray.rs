@@ -251,11 +251,17 @@ fn refresh_menu<R: Runtime>(app: &AppHandle<R>) {
 
     match load_accounts()
         .map_err(|error| error.to_string())
-        .and_then(|store| build_menu(app, &store).map_err(|error| error.to_string()))
-    {
-        Ok(menu) => {
+        .and_then(|store| {
+            let title = active_session_title(store.active_account_id.as_deref());
+            let menu = build_menu(app, &store).map_err(|error| error.to_string())?;
+            Ok((menu, title))
+        }) {
+        Ok((menu, title)) => {
             if let Err(error) = tray.set_menu(Some(menu)) {
                 eprintln!("Failed to refresh tray menu: {error}");
+            }
+            if let Err(error) = tray.set_title(title.as_deref()) {
+                eprintln!("Failed to refresh tray title: {error}");
             }
         }
         Err(error) => eprintln!("Failed to build tray menu: {error}"),
@@ -264,6 +270,27 @@ fn refresh_menu<R: Runtime>(app: &AppHandle<R>) {
 
 fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
     restore_main_window(app);
+}
+
+// The tray title sits after the icon, e.g. "[icon] 66%".
+fn active_session_title(active_account_id: Option<&str>) -> Option<String> {
+    let active_account_id = active_account_id?;
+    let cache = TRAY_USAGE.lock().ok()?;
+    let usage = cache.get(active_account_id)?;
+    session_remaining_title(usage.primary_used_percent, usage.error.is_some())
+}
+
+fn session_remaining_title(used_percent: Option<f64>, has_error: bool) -> Option<String> {
+    if has_error {
+        return None;
+    }
+
+    let used_percent = used_percent?;
+    if !used_percent.is_finite() {
+        return None;
+    }
+
+    Some(format!("{:.0}%", (100.0 - used_percent).clamp(0.0, 100.0)))
 }
 
 // "  —  S:73% W:51%" remaining-quota suffix for a menu label, or "" when unknown.
@@ -279,11 +306,13 @@ fn usage_suffix(account_id: &str) -> String {
     }
 
     let mut parts = Vec::new();
-    if let Some(used) = usage.primary_used_percent {
-        parts.push(format!("S:{:.0}%", (100.0 - used).max(0.0)));
+    if let Some(remaining) = session_remaining_title(usage.primary_used_percent, false) {
+        parts.push(format!("S:{remaining}"));
     }
     if let Some(used) = usage.secondary_used_percent {
-        parts.push(format!("W:{:.0}%", (100.0 - used).max(0.0)));
+        if used.is_finite() {
+            parts.push(format!("W:{:.0}%", (100.0 - used).clamp(0.0, 100.0)));
+        }
     }
 
     if parts.is_empty() {
@@ -361,6 +390,33 @@ mod tests {
         assert_eq!(
             menu_label("Research & Development"),
             "Research && Development"
+        );
+    }
+
+    #[test]
+    fn session_title_shows_remaining_percentage() {
+        assert_eq!(
+            session_remaining_title(Some(34.0), false),
+            Some("66%".to_string())
+        );
+    }
+
+    #[test]
+    fn session_title_hides_unknown_or_invalid_usage() {
+        assert_eq!(session_remaining_title(None, false), None);
+        assert_eq!(session_remaining_title(Some(f64::NAN), false), None);
+        assert_eq!(session_remaining_title(Some(34.0), true), None);
+    }
+
+    #[test]
+    fn session_title_clamps_remaining_percentage() {
+        assert_eq!(
+            session_remaining_title(Some(-5.0), false),
+            Some("100%".to_string())
+        );
+        assert_eq!(
+            session_remaining_title(Some(105.0), false),
+            Some("0%".to_string())
         );
     }
 }
